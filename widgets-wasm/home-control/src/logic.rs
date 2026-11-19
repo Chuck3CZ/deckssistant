@@ -116,6 +116,16 @@ pub fn state_line(state: &str, unit: Option<&str>) -> String {
     }
 }
 
+/// What an on/off entity shows right after a tap, before Home Assistant confirms it.
+#[must_use]
+pub fn toggled_state(state: &str) -> Option<&'static str> {
+    match state {
+        "on" => Some("off"),
+        "off" => Some("on"),
+        _ => None,
+    }
+}
+
 /// How a tile should look, from calm to urgent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -286,6 +296,14 @@ mod tests {
         assert_eq!(tone("binary_sensor.kour", Some("smoke"), "on"), Tone::Alert);
         assert_eq!(tone("light.a", None, "on"), Tone::On);
         assert_eq!(tone("light.a", None, "unavailable"), Tone::Dim);
+    }
+
+    #[wasm_test]
+    fn optimistic_toggle() {
+        assert_eq!(toggled_state("on"), Some("off"));
+        assert_eq!(toggled_state("off"), Some("on"));
+        assert_eq!(toggled_state("unavailable"), None);
+        assert_eq!(toggled_state("21.5"), None);
     }
 
     #[wasm_test]

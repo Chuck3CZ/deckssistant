@@ -29,14 +29,16 @@ use bmc_wasm_sdk::*;
 
 use crate::icons;
 use crate::logic::{
-    Tone, base_url, columns, default_icon, display_state, mdi_name, service_request, tap_for, tone,
+    Tone, base_url, columns, default_icon, display_state, mdi_name, service_request, tap_for, toggled_state, tone,
     valid_entity_id,
 };
 use crate::manifest_params::Params;
 
 const POLL_MS: u32 = 6_000;
 const RETRY_MS: u32 = 15_000;
-const STAGGER_MS: u32 = 80;
+/// The host allows 16 fetches in flight, queued ones included; stay well under it so a tap always fits.
+const WINDOW: usize = 6;
+const STAGGER_MS: u32 = 60;
 const GAP: f32 = 8.0;
 const MESSAGE_SIZE: u32 = 22;
 const AUTH: &str = "Authorization: Bearer {{ credential.ha.token }}\nContent-Type: application/json";
@@ -69,13 +71,15 @@ struct State {
     tiles: Vec<Tile>,
     health: Health,
     inflight: Vec<(FetchRequestId, usize)>,
+    /// The next entity to ask about in the cycle under way.
+    next: usize,
     /// The worst failure seen in the cycle under way.
     failure: Option<Health>,
 }
 
 thread_local! {
     static STATE: RefCell<State> = const {
-        RefCell::new(State { tiles: Vec::new(), health: Health::Loading, inflight: Vec::new(), failure: None })
+        RefCell::new(State { tiles: Vec::new(), health: Health::Loading, inflight: Vec::new(), next: 0, failure: None })
     };
 }
 
@@ -99,7 +103,17 @@ fn severity(health: Health) -> u8 {
     }
 }
 
-/// Cancel whatever is queued and ask Home Assistant for every entity, after `delay_ms`.
+fn send_state_get(s: &mut State, base: &str, ids: &[String], i: usize, delay_ms: u32) {
+    let Some(entity) = ids.get(i) else { return };
+    let url = format!("{base}/api/states/{entity}");
+    match FetchRequest::get(&url).headers(AUTH).send_after(delay_ms, on_state) {
+        Some(id) => s.inflight.push((id, i)),
+        None => s.failure = Some(Health::Unreachable),
+    }
+}
+
+/// Cancel whatever is queued and ask Home Assistant about every entity, after `delay_ms`.
+/// Only `WINDOW` requests are out at a time; each answer releases the next one.
 fn poll(delay_ms: u32) {
     let (base, ids) = config();
     STATE.with_borrow_mut(|s| {
@@ -107,19 +121,19 @@ fn poll(delay_ms: u32) {
             let _ = cancel(id);
         }
         s.failure = None;
+        s.next = 0;
         s.tiles.resize(ids.len(), Tile::default());
         let Some(base) = base.filter(|_| !ids.is_empty()) else {
             s.health = Health::NotConfigured;
             s.tiles.clear();
             return;
         };
-        for (i, entity) in ids.iter().enumerate() {
-            let url = format!("{base}/api/states/{entity}");
-            let delay = delay_ms.saturating_add(STAGGER_MS * u32::try_from(i).unwrap_or(0));
-            if let Some(id) = FetchRequest::get(&url).headers(AUTH).send_after(delay, on_state) {
-                s.inflight.push((id, i));
-            }
+        let first = ids.len().min(WINDOW);
+        for i in 0..first {
+            let stagger = STAGGER_MS * u32::try_from(i).unwrap_or(0);
+            send_state_get(s, &base, &ids, i, delay_ms.saturating_add(stagger));
         }
+        s.next = first;
         if s.inflight.is_empty() {
             s.health = Health::Unreachable;
         }
@@ -162,6 +176,14 @@ fn on_state(response: &FetchResponse) {
         };
         if severity(result) > s.failure.map_or(0, severity) {
             s.failure = Some(result);
+        }
+        let (base, ids) = config();
+        if let Some(base) = base
+            && s.next < ids.len()
+        {
+            let i = s.next;
+            s.next += 1;
+            send_state_get(s, &base, &ids, i, 0);
         }
         if s.inflight.is_empty() {
             s.health = s.failure.take().unwrap_or(Health::Ok);
@@ -352,6 +374,16 @@ pub extern "C" fn render(_delta_ms: u32) {
             .send(on_service_done);
         if sent.is_none() {
             log_error!("home-control: service call not queued");
+            continue;
         }
+        // Show the new state at once; the poll that follows the call confirms or corrects it.
+        STATE.with_borrow_mut(|s| {
+            if let Some(t) = s.tiles.get_mut(i)
+                && let Some(flipped) = t.state.as_deref().and_then(toggled_state)
+            {
+                t.state = Some(flipped.to_string());
+            }
+        });
+        request_frame();
     }
 }
