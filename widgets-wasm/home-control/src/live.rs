@@ -18,104 +18,137 @@
 // under any terms, and such a grant shall be considered distinct from
 // the grant above.
 
-//! The entry points the host calls. One Home Assistant client lives for the
-//! widget's lifetime; its subscription is rebuilt when the entity list changes.
+//! The entry points the host calls. The widget polls Home Assistant's REST API
+//! with one `/api/template` request for all tiles, and a tap posts a service call.
 
 use std::cell::RefCell;
 
 use bmc_wasm_sdk::*;
-use home_assistant::{Client, ConnectError, Event, Presence, ServiceData, Status, Subscription};
 
-use crate::logic::{is_active, state_line, tap_for};
+use crate::logic::{
+    base_url, is_active, service_request, state_line, tap_for, template_request, valid_entity_id,
+};
 use crate::manifest_params::Params;
 
-const SLOT: &str = "ha";
+const POLL_MS: u32 = 5_000;
+const RETRY_MS: u32 = 15_000;
 const COLUMNS: usize = 4;
 const GAP: f32 = 8.0;
 const NAME_SIZE: u32 = 16;
 const STATE_SIZE: u32 = 22;
 const MESSAGE_SIZE: u32 = 22;
+const AUTH: &str = "Authorization: Bearer {{ credential.ha.token }}\nContent-Type: application/json";
 
-struct Ha {
-    client: Client,
-    sub: Option<Subscription>,
-    ids: Vec<String>,
+#[derive(Clone, Default)]
+struct Tile {
+    name: Option<String>,
+    state: Option<String>,
+    unit: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Health {
+    Loading,
+    Ok,
+    BadToken,
+    Unreachable,
+    NotConfigured,
+}
+
+struct State {
+    tiles: Vec<Tile>,
+    health: Health,
+    pending: Option<FetchRequestId>,
 }
 
 thread_local! {
-    static HA: RefCell<Option<Ha>> = const { RefCell::new(None) };
+    static STATE: RefCell<State> = const {
+        RefCell::new(State { tiles: Vec::new(), health: Health::Loading, pending: None })
+    };
 }
 
-fn wanted_ids() -> Vec<String> {
-    Params::current()
+fn config() -> (Option<String>, Vec<String>) {
+    let params = Params::current();
+    let ids = params
         .entities
         .iter()
         .map(|e| e.entity_id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .collect()
+        .filter(|id| valid_entity_id(id))
+        .collect();
+    (base_url(&params.ha_url), ids)
 }
 
-/// (Re)subscribe to the configured entities, if the list changed.
-fn sync_subscription(ha: &mut Ha) {
-    let ids = wanted_ids();
-    if ha.sub.is_some() && ids == ha.ids {
-        return;
-    }
-    ha.sub = None;
-    if ids.is_empty() {
-        ha.ids = ids;
-        return;
-    }
-    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    match ha.client.subscribe(&refs, &["friendly_name", "unit_of_measurement"]) {
-        Ok(sub) => {
-            ha.sub = Some(sub);
-            ha.ids = ids;
+/// Cancel whatever is queued and ask Home Assistant now, or after `delay_ms`.
+fn poll(delay_ms: u32) {
+    let (base, ids) = config();
+    STATE.with_borrow_mut(|s| {
+        if let Some(id) = s.pending.take() {
+            let _ = cancel(id);
         }
-        Err(_) => log_error!("home-control: Home Assistant subscription refused"),
-    }
+        let Some(base) = base.filter(|_| !ids.is_empty()) else {
+            s.health = Health::NotConfigured;
+            s.tiles.clear();
+            return;
+        };
+        let url = format!("{base}/api/template");
+        let body = template_request(&ids);
+        s.pending = FetchRequest::post(&url)
+            .headers(AUTH)
+            .body(body.as_bytes())
+            .send_after(delay_ms, on_states);
+    });
+    request_frame();
 }
 
-fn on_ha_event(_client: &Client, event: &Event) {
-    if matches!(event, Event::StatusChanged(_) | Event::EntityChanged { .. }) {
-        request_frame_after(100);
-    }
+fn on_states(response: &FetchResponse) {
+    let (_, ids) = config();
+    let mut next = RETRY_MS;
+    STATE.with_borrow_mut(|s| {
+        s.pending = None;
+        match response.outcome() {
+            Some(FetchOutcome::Http(200..=299)) => {
+                let doc = JsonDoc::parse(response.body());
+                let count = doc.len("").unwrap_or(0);
+                if doc.is_valid() && count == ids.len() {
+                    s.tiles = (0..count)
+                        .map(|i| Tile {
+                            state: doc.str(&format!("/{i}/s")),
+                            name: doc.str(&format!("/{i}/n")),
+                            unit: doc.str(&format!("/{i}/u")),
+                        })
+                        .collect();
+                    s.health = Health::Ok;
+                    next = POLL_MS;
+                } else {
+                    s.health = Health::Unreachable;
+                }
+            }
+            Some(FetchOutcome::Http(401 | 403)) => s.health = Health::BadToken,
+            Some(FetchOutcome::Refused) => s.health = Health::NotConfigured,
+            _ => s.health = Health::Unreachable,
+        }
+    });
+    poll(next);
+}
+
+fn on_service_done(_response: &FetchResponse) {
+    poll(300);
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn init() {
-    let client = match home_assistant::connect(SLOT, on_ha_event) {
-        Ok(client) => client,
-        Err(ConnectError::NoTimerAvailable) => {
-            log_error!("home-control: no timer left for the Home Assistant client");
-            return;
-        }
-    };
-    let mut ha = Ha { client, sub: None, ids: Vec::new() };
-    sync_subscription(&mut ha);
-    HA.set(Some(ha));
-    request_frame();
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn on_credentials_update() {
-    HA.with_borrow(|ha| {
-        if let Some(ha) = ha {
-            ha.client.resume();
-        }
-    });
-    request_frame();
+    poll(0);
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn on_params_update() {
-    HA.with_borrow_mut(|ha| {
-        if let Some(ha) = ha {
-            ha.client.resume();
-            sync_subscription(ha);
-        }
-    });
-    request_frame();
+    STATE.with_borrow_mut(|s| s.tiles.clear());
+    poll(0);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn on_credentials_update() {
+    poll(0);
 }
 
 #[unsafe(no_mangle)]
@@ -162,55 +195,49 @@ fn tile(index: usize, name: String, state: String, active: bool) -> Node {
 #[unsafe(no_mangle)]
 pub extern "C" fn render(_delta_ms: u32) {
     let size = widget_size();
-    let ids = wanted_ids();
+    let params = Params::current();
+    let (base, ids) = config();
+    let (tiles, health) = STATE.with_borrow(|s| (s.tiles.clone(), s.health));
 
-    let Some((status, snapshot)) = HA.with_borrow(|ha| {
-        let ha = ha.as_ref()?;
-        let entities: Vec<_> = ids
-            .iter()
-            .map(|id| ha.sub.as_ref().and_then(|s| s.entity(id)))
-            .collect();
-        Some((ha.client.status(), entities))
-    }) else {
-        let _ = render_ui(size.width, size.height, message("Home Assistant unavailable"));
-        return;
+    let note = match health {
+        _ if base.is_none() => Some("Set the Home Assistant address (http://IP:8123) in the settings"),
+        _ if ids.is_empty() => Some("Add entities in the settings"),
+        Health::NotConfigured => Some("Bind a Home Assistant token to this widget"),
+        Health::BadToken => Some("Home Assistant rejected the token"),
+        Health::Unreachable if tiles.is_empty() => Some("Cannot reach Home Assistant"),
+        Health::Loading => Some("Connecting…"),
+        _ => None,
     };
-
-    if ids.is_empty() {
-        let _ = render_ui(size.width, size.height, message("Add entities in the settings"));
+    if let (Some(note), true) = (note, tiles.is_empty()) {
+        let _ = render_ui(size.width, size.height, message(note));
         return;
     }
 
-    let mut tiles = Vec::new();
-    for (i, (id, ent)) in ids.iter().zip(snapshot.iter()).enumerate() {
-        let (name, state, active) = match ent {
-            Some(e) if e.presence != Presence::Missing && e.state.is_some() => {
-                let raw = e.state.as_deref().unwrap_or("");
-                let name = e.text("friendly_name").unwrap_or(id).to_string();
-                (name, state_line(raw, e.text("unit_of_measurement")), is_active(raw))
-            }
-            Some(e) if e.presence == Presence::Missing => (id.clone(), "Not found".to_string(), false),
-            _ => (id.clone(), "…".to_string(), false),
-        };
-        let params = Params::current();
-        let name = params
+    let mut nodes = Vec::new();
+    for (i, id) in ids.iter().enumerate() {
+        let t = tiles.get(i).cloned().unwrap_or_default();
+        let label = params
             .entities
-            .get(i)
-            .and_then(|p| p.label.as_deref())
-            .filter(|l| !l.trim().is_empty())
-            .map_or(name, str::to_string);
-        tiles.push(tile(i, name, state, active));
+            .iter()
+            .filter(|e| valid_entity_id(e.entity_id.trim()))
+            .nth(i)
+            .and_then(|e| e.label.as_deref())
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string);
+        let name = label.or(t.name).unwrap_or_else(|| id.clone());
+        let raw = t.state.as_deref();
+        let line = raw.map_or_else(|| "…".to_string(), |s| state_line(s, t.unit.as_deref()));
+        nodes.push(tile(i, name, line, raw.is_some_and(is_active)));
     }
-
-    let rows: Vec<Node> = tiles
+    let mut children: Vec<Node> = nodes
         .chunks(COLUMNS)
         .map(<[Node]>::to_vec)
         .map(|chunk| row(props!(flex: 1.0, gap: GAP), chunk))
         .collect();
-    let mut children = rows;
-    if !matches!(status, Status::Ready) {
+    if let Some(note) = note {
         children.push(text(
-            format!("{status:?}"),
+            note.to_string(),
             style!(size: 14, weight: FontWeight::REGULAR, color: GRAY_30, line_height: 1.0),
         ));
     }
@@ -220,17 +247,20 @@ pub extern "C" fn render(_delta_ms: u32) {
         col(props!(background: BLACK, padding: GAP, gap: GAP), children),
     );
 
+    let Some(base) = base else { return };
     for (i, id) in ids.iter().enumerate() {
         if !result.clicks.contains_key(format!("tile_{i}").as_str()) {
             continue;
         }
         let Some(tap) = tap_for(id) else { continue };
-        HA.with_borrow(|ha| {
-            if let Some(ha) = ha {
-                if ha.client.call_service(tap.domain, tap.service, id, &ServiceData::new()).is_err() {
-                    log_error!("home-control: service call refused");
-                }
-            }
-        });
+        let url = format!("{base}/api/services/{}/{}", tap.domain, tap.service);
+        let body = service_request(id);
+        let sent = FetchRequest::post(&url)
+            .headers(AUTH)
+            .body(body.as_bytes())
+            .send(on_service_done);
+        if sent.is_none() {
+            log_error!("home-control: service call not queued");
+        }
     }
 }

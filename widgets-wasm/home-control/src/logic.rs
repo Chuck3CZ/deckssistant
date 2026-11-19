@@ -53,6 +53,63 @@ pub fn tap_for(entity_id: &str) -> Option<Tap> {
     Some(Tap { domain, service })
 }
 
+
+/// An entity id the widget will put into a request: lowercase letters, digits, `_`
+/// and one `.` between a domain and an object id. Anything else is dropped, so an
+/// operator's text can never reach the template or a URL as syntax.
+#[must_use]
+pub fn valid_entity_id(id: &str) -> bool {
+    let Some((domain, object)) = id.split_once('.') else {
+        return false;
+    };
+    let ok = |s: &str| {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    };
+    ok(domain) && ok(object) && id.len() <= 255
+}
+
+/// `http://host:8123/` (or without the scheme-less slash) as a bare base, or `None`.
+#[must_use]
+pub fn base_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let rest = trimmed.strip_prefix("http://")?;
+    let valid = !rest.is_empty()
+        && !rest.contains(['/', '?', '#', '@', ' ', '{', '}'])
+        && rest.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'_'));
+    valid.then(|| trimmed.to_string())
+}
+
+fn json_escape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 8);
+    for c in raw.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c if (c as u32) < 0x20 => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The body of `POST /api/template`: a template that renders one JSON array with the
+/// state, name and unit of every entity, in order.
+#[must_use]
+pub fn template_request(ids: &[String]) -> String {
+    let list = ids.iter().map(|id| format!("'{id}'")).collect::<Vec<_>>().join(",");
+    let template = format!(
+        "[{{% for i in [{list}] %}}{{\"s\":{{{{ states(i)|tojson }}}},\"n\":{{{{ state_attr(i,'friendly_name')|tojson }}}},\"u\":{{{{ state_attr(i,'unit_of_measurement')|tojson }}}}}}{{{{ ',' if not loop.last }}}}{{% endfor %}}]"
+    );
+    format!("{{\"template\":\"{}\"}}", json_escape(&template))
+}
+
+/// The body of a service call for one entity.
+#[must_use]
+pub fn service_request(entity_id: &str) -> String {
+    format!("{{\"entity_id\":\"{}\"}}", json_escape(entity_id))
+}
+
 /// Whether a state string reads as "on" for highlighting.
 #[must_use]
 pub fn is_active(state: &str) -> bool {
@@ -84,6 +141,25 @@ mod tests {
         assert_eq!(tap_for("sensor.outdoor"), None);
         assert_eq!(tap_for("nodot"), None);
         assert_eq!(tap_for("light."), None);
+    }
+
+    #[wasm_test]
+    fn entity_ids_and_urls() {
+        assert!(valid_entity_id("light.living_room"));
+        assert!(!valid_entity_id("light.x'}}"));
+        assert!(!valid_entity_id("nodot"));
+        assert_eq!(base_url("http://192.168.1.10:8123/").as_deref(), Some("http://192.168.1.10:8123"));
+        assert_eq!(base_url("https://ha.local"), None);
+        assert_eq!(base_url("http://a/b"), None);
+        assert_eq!(base_url(""), None);
+    }
+
+    #[wasm_test]
+    fn requests() {
+        assert_eq!(service_request("light.a"), "{\"entity_id\":\"light.a\"}");
+        let body = template_request(&["light.a".to_string(), "sensor.b".to_string()]);
+        assert!(body.starts_with("{\"template\":\""));
+        assert!(body.contains("'light.a','sensor.b'"));
     }
 
     #[wasm_test]

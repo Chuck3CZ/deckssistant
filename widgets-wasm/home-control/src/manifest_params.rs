@@ -27,6 +27,7 @@ impl snapshot::typed::ValueRead for EntitiesItem {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
     pub entities: Vec<EntitiesItem>,
+    pub ha_url: String,
 }
 impl Params {
     /// Materialise a typed snapshot from a dynamic [`snapshot::Params`].
@@ -34,6 +35,7 @@ impl Params {
     pub fn from_snapshot(snap: &snapshot::Params) -> Self {
         Self {
             entities: <Vec<EntitiesItem> as ParamRead>::read_required(snap, "entities"),
+            ha_url: <String as ParamRead>::read_required(snap, "ha_url"),
         }
     }
     /// Latest typed snapshot delivered for this widget instance.
@@ -82,20 +84,19 @@ impl Params {
         if self.entities != other.entities {
             out.push("entities");
         }
+        if self.ha_url != other.ha_url {
+            out.push("ha_url");
+        }
         out
     }
 }
 /// Credential slots this widget declares, one module per slot.
 pub mod credentials {
-    ///Home Assistant — a `home-assistant` account. Required — the widget cannot work until an account is bound.
+    ///Home Assistant token — a `generic-token` account. Required — the widget cannot work until an account is bound.
     ///
-    ///Instance address and long-lived access token
+    ///Long-lived access token (Profile > Security in Home Assistant)
     pub mod ha {
         ///Placeholder for this slot's `token` field.
         pub const TOKEN: &str = "{{ credential.ha.token }}";
-        ///Placeholder for this slot's `url` field.
-        pub const URL: &str = "{{ credential.ha.url }}";
-        ///Placeholder for this slot's `websocket_url` field.
-        pub const WEBSOCKET_URL: &str = "{{ credential.ha.websocket_url }}";
     }
 }

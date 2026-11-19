@@ -9,7 +9,6 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 bmc-wasm-sdk = { path = "../../bmc-wasm-runtime/sdk" }
-home-assistant = { path = "../lib/home-assistant" }
 
 [lints]
 workspace = true

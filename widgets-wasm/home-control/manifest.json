@@ -3,7 +3,7 @@
   "uid": "b4f1fb26-1149-4915-9908-cf560e8e0ddc",
   "version": "0.1.0",
   "name": "Home Control",
-  "description": "Show and toggle Home Assistant entities with a tap",
+  "description": "Show and toggle Home Assistant entities with a tap (REST API)",
   "binary": "bin/home-control",
   "supported_viewports": [
     {
@@ -16,19 +16,28 @@
   ],
   "credentials": {
     "ha": {
-      "type": "home-assistant",
-      "label": "Home Assistant",
-      "description": "Instance address and long-lived access token",
+      "type": "generic-token",
+      "label": "Home Assistant token",
+      "description": "Long-lived access token (Profile > Security in Home Assistant)",
       "required": true
     }
   },
   "params": {
+    "ha_url": {
+      "name": "Home Assistant address",
+      "description": "Local address with port, e.g. http://192.168.1.10:8123 (https is not supported)",
+      "type": "string",
+      "default_value": "",
+      "placeholder": "http://192.168.1.10:8123"
+    },
     "entities": {
       "name": "Entities",
       "description": "Tiles in display order. Tap toggles lights, switches, fans and similar; runs scenes, scripts and buttons.",
       "type": "array",
       "max_items": 8,
-      "unique_items": ["entity_id"],
+      "unique_items": [
+        "entity_id"
+      ],
       "items": {
         "type": "object",
         "fields": {

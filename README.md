@@ -1,6 +1,6 @@
 # deckssistant
 
-Home Assistant widget for the [Braiins Deck](https://braiinsforge.com/hardware/braiins-deck) (firmware 26.10+).
+Home Assistant widget for the [Braiins Deck](https://braiinsforge.com/hardware/braiins-deck) (firmware 26.10.1+).
 Shows tiles for chosen entities; a tap toggles lights, switches, fans, covers and automations, runs scenes and
 scripts, and presses buttons.
 
@@ -11,11 +11,15 @@ Licensed GPL-3.0-or-later, like that repository.
 
 1. Download [`home-control.nar`](home-control.nar).
 2. On the Deck: **Display Widgets → Install Widget**, accept the third-party notice, pick the file.
-3. In the device web UI, add a **Home Assistant** account (`http://` address + Long-Lived Access Token) and bind it
-   to the widget's `Home Assistant` slot.
-4. Add the entities (e.g. `light.living_room`) in the widget settings.
+3. In the device web UI, add a **generic token** account whose token is a Home Assistant Long-Lived Access Token
+   (Profile -> Security in Home Assistant) and bind it to the widget's `Home Assistant token` slot.
+4. In the widget settings, set **Home Assistant address** (e.g. `http://192.168.1.10:8123`) and add the entities
+   (e.g. `light.living_room`).
 
-Home Assistant 2024.3 or newer is required. `https://` addresses are not supported by the Deck yet.
+The widget polls the Home Assistant REST API (one `/api/template` request every 5 s) and taps call
+`/api/services/<domain>/<service>`. Use an IP address or a name the Deck can resolve. `https://` is not supported.
+
+Firmware 26.10.1 does not know the `home-assistant` credential type, so this widget uses `generic-token`.
 
 ## Build
 
