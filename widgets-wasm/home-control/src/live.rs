@@ -20,32 +20,40 @@
 
 //! The entry points the host calls. The widget polls Home Assistant's REST API
 //! with one `GET /api/states/<entity>` per tile, and a tap posts a service call.
+//! Entities are picked in the settings UI (one dropdown per tile); icons are the bundled MDI set.
 //! No Jinja template is sent: the host reads every `{{ … }}` in a request as a credential reference.
 
 use std::cell::RefCell;
 
 use bmc_wasm_sdk::*;
 
+use crate::icons;
 use crate::logic::{
-    base_url, is_active, service_request, state_line, tap_for, valid_entity_id,
+    Tone, base_url, columns, default_icon, display_state, mdi_name, service_request, tap_for, tone,
+    valid_entity_id,
 };
 use crate::manifest_params::Params;
 
-const POLL_MS: u32 = 5_000;
+const POLL_MS: u32 = 6_000;
 const RETRY_MS: u32 = 15_000;
-const COLUMNS: usize = 4;
 const STAGGER_MS: u32 = 80;
 const GAP: f32 = 8.0;
-const NAME_SIZE: u32 = 16;
-const STATE_SIZE: u32 = 22;
 const MESSAGE_SIZE: u32 = 22;
 const AUTH: &str = "Authorization: Bearer {{ credential.ha.token }}\nContent-Type: application/json";
+
+const TEXT_DIM: Color = Color::from_hex(0x6B_6B_6B);
+const TEXT_IDLE: Color = Color::from_hex(0xB8_B8_B8);
+const GREEN: Color = Color::from_hex(0x34_C0_6A);
+const AMBER: Color = Color::from_hex(0xF5_A5_24);
+const RED: Color = Color::from_hex(0xFF_4D_4F);
 
 #[derive(Clone, Default)]
 struct Tile {
     name: Option<String>,
     state: Option<String>,
     unit: Option<String>,
+    device_class: Option<String>,
+    icon: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -72,14 +80,14 @@ thread_local! {
 }
 
 fn config() -> (Option<String>, Vec<String>) {
-    let params = Params::current();
-    let ids = params
-        .entities
-        .iter()
-        .map(|e| e.entity_id.trim().to_string())
-        .filter(|id| valid_entity_id(id))
-        .collect();
-    (base_url(&params.ha_url), ids)
+    let p = Params::current();
+    let mut ids: Vec<String> = Vec::new();
+    for id in p.entities {
+        if valid_entity_id(&id) && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    (base_url(&p.ha_url), ids)
 }
 
 fn severity(health: Health) -> u8 {
@@ -91,7 +99,7 @@ fn severity(health: Health) -> u8 {
     }
 }
 
-/// Cancel whatever is queued and ask Home Assistant for every entity, after \`delay_ms\`.
+/// Cancel whatever is queued and ask Home Assistant for every entity, after `delay_ms`.
 fn poll(delay_ms: u32) {
     let (base, ids) = config();
     STATE.with_borrow_mut(|s| {
@@ -126,8 +134,7 @@ fn on_state(response: &FetchResponse) {
             return;
         };
         let (_, index) = s.inflight.remove(pos);
-        let outcome = response.outcome();
-        let result = match outcome {
+        let result = match response.outcome() {
             Some(FetchOutcome::Http(200..=299)) => {
                 let doc = JsonDoc::parse(response.body());
                 if let (true, Some(tile)) = (doc.is_valid(), s.tiles.get_mut(index)) {
@@ -135,6 +142,8 @@ fn on_state(response: &FetchResponse) {
                         state: doc.str("/state"),
                         name: doc.str("/attributes/friendly_name"),
                         unit: doc.str("/attributes/unit_of_measurement"),
+                        device_class: doc.str("/attributes/device_class"),
+                        icon: doc.str("/attributes/icon"),
                     };
                     Health::Ok
                 } else {
@@ -143,7 +152,7 @@ fn on_state(response: &FetchResponse) {
             }
             Some(FetchOutcome::Http(404)) => {
                 if let Some(tile) = s.tiles.get_mut(index) {
-                    *tile = Tile { state: Some("Not found".to_string()), name: None, unit: None };
+                    *tile = Tile { state: Some("unavailable".to_string()), ..Tile::default() };
                 }
                 Health::Ok
             }
@@ -207,19 +216,71 @@ fn message(msg: &str) -> Node {
     )
 }
 
-fn tile(index: usize, name: String, state: String, active: bool) -> Node {
+/// Text and icon sizes that grow as the grid gets sparser.
+struct Scale {
+    icon: f32,
+    name: u32,
+    state: u32,
+}
+
+fn scale(cols: usize) -> Scale {
+    match cols {
+        0..=2 => Scale { icon: 64.0, name: 24, state: 36 },
+        3..=4 => Scale { icon: 44.0, name: 17, state: 26 },
+        5 => Scale { icon: 36.0, name: 15, state: 22 },
+        _ => Scale { icon: 30.0, name: 13, state: 19 },
+    }
+}
+
+fn tone_color(tone: Tone) -> Color {
+    match tone {
+        Tone::Dim => TEXT_DIM,
+        Tone::Off => TEXT_IDLE,
+        Tone::On => GREEN,
+        Tone::Warn => AMBER,
+        Tone::Alert => RED,
+    }
+}
+
+fn icon_for(id: &str, t: &Tile) -> Svg {
+    let state = t.state.as_deref().unwrap_or("unknown");
+    let own = t.icon.as_deref().and_then(mdi_name).and_then(icons::by_name);
+    own.or_else(|| icons::by_name(default_icon(id, t.device_class.as_deref(), state)))
+        .or_else(|| icons::by_name("help-circle-outline"))
+        .expect("BUG: help-circle-outline is bundled")
+}
+
+fn tile(index: usize, id: &str, t: &Tile, sc: &Scale) -> Node {
     let key = format!("tile_{index}");
-    let weight = if active { FontWeight::BOLD } else { FontWeight::REGULAR };
-    col(
-        props!(flex: 1.0, background: GRAY_100, padding: 12.0, gap: 4.0, justify_content: Justify::Center),
+    let raw = t.state.as_deref();
+    let tone = raw.map_or(Tone::Dim, |s| tone(id, t.device_class.as_deref(), s));
+    let color = tone_color(tone);
+    let name = t.name.clone().unwrap_or_else(|| id.to_string());
+    let line = raw.map_or_else(
+        || "…".to_string(),
+        |s| display_state(id, t.device_class.as_deref(), s, t.unit.as_deref()),
+    );
+    let weight = if matches!(tone, Tone::On | Tone::Warn | Tone::Alert) { FontWeight::BOLD } else { FontWeight::REGULAR };
+    let icon = icon_for(id, t);
+    row(
+        props!(flex: 1.0, background: GRAY_100, padding: 10.0, gap: 10.0, border_radius: 8.0, cross_align: CrossAlign::Center),
         vec![
-            text(
-                name,
-                style!(size: NAME_SIZE, weight: FontWeight::REGULAR, color: GRAY_30, line_height: 1.0, text_overflow: TextOverflow::Ellipsis),
+            canvas(
+                props!(width: sc.icon, height: sc.icon),
+                [Draw::svg_contain(&icon, sc.icon, color).with_anti_alias()],
             ),
-            text(
-                state,
-                style!(size: STATE_SIZE, weight: weight, color: WHITE, line_height: 1.0, text_overflow: TextOverflow::Ellipsis),
+            col(
+                props!(flex: 1.0, gap: 4.0, justify_content: Justify::Center),
+                vec![
+                    text(
+                        name,
+                        style!(size: sc.name, weight: FontWeight::REGULAR, color: TEXT_IDLE, line_height: 1.0, text_overflow: TextOverflow::Ellipsis),
+                    ),
+                    text(
+                        line,
+                        style!(size: sc.state, weight: weight, color: color, line_height: 1.0, text_overflow: TextOverflow::Ellipsis),
+                    ),
+                ],
             ),
             touchable(
                 &key,
@@ -233,17 +294,16 @@ fn tile(index: usize, name: String, state: String, active: bool) -> Node {
 #[unsafe(no_mangle)]
 pub extern "C" fn render(_delta_ms: u32) {
     let size = widget_size();
-    let params = Params::current();
     let (base, ids) = config();
     let (tiles, health) = STATE.with_borrow(|s| (s.tiles.clone(), s.health));
 
     let note = match health {
-        _ if base.is_none() => Some("Set the Home Assistant address (http://IP:8123) in the settings"),
-        _ if ids.is_empty() => Some("Add entities in the settings"),
-        Health::NotConfigured => Some("Bind a Home Assistant token to this widget"),
-        Health::BadToken => Some("Home Assistant rejected the token"),
-        Health::Unreachable if tiles.is_empty() => Some("Cannot reach Home Assistant"),
-        Health::Loading => Some("Connecting…"),
+        _ if base.is_none() => Some("Nastav adresu Home Assistantu (http://IP:8123) v nastavení widgetu"),
+        _ if ids.is_empty() => Some("Vyber entity v nastavení widgetu"),
+        Health::NotConfigured => Some("Přiřaď widgetu token Home Assistantu"),
+        Health::BadToken => Some("Home Assistant odmítl token"),
+        Health::Unreachable if tiles.is_empty() => Some("Home Assistant není dostupný"),
+        Health::Loading => Some("Připojuji…"),
         _ => None,
     };
     if let (Some(note), true) = (note, tiles.is_empty()) {
@@ -251,25 +311,18 @@ pub extern "C" fn render(_delta_ms: u32) {
         return;
     }
 
-    let mut nodes = Vec::new();
-    for (i, id) in ids.iter().enumerate() {
-        let t = tiles.get(i).cloned().unwrap_or_default();
-        let label = params
-            .entities
-            .iter()
-            .filter(|e| valid_entity_id(e.entity_id.trim()))
-            .nth(i)
-            .and_then(|e| e.label.as_deref())
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string);
-        let name = label.or(t.name).unwrap_or_else(|| id.clone());
-        let raw = t.state.as_deref();
-        let line = raw.map_or_else(|| "…".to_string(), |s| state_line(s, t.unit.as_deref()));
-        nodes.push(tile(i, name, line, raw.is_some_and(is_active)));
+    let cols = columns(ids.len());
+    let sc = scale(cols);
+    let mut nodes: Vec<Node> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| tile(i, id, &tiles.get(i).cloned().unwrap_or_default(), &sc))
+        .collect();
+    while nodes.len() % cols != 0 {
+        nodes.push(col(props!(flex: 1.0), Vec::<Node>::new()));
     }
     let mut children: Vec<Node> = nodes
-        .chunks(COLUMNS)
+        .chunks(cols)
         .map(<[Node]>::to_vec)
         .map(|chunk| row(props!(flex: 1.0, gap: GAP), chunk))
         .collect();

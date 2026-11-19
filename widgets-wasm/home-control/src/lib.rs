@@ -26,5 +26,7 @@
 
 pub mod logic;
 #[cfg(target_arch = "wasm32")]
+mod icons;
+#[cfg(target_arch = "wasm32")]
 mod live;
 mod manifest_params;

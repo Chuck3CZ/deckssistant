@@ -116,6 +116,131 @@ pub fn state_line(state: &str, unit: Option<&str>) -> String {
     }
 }
 
+/// How a tile should look, from calm to urgent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// Unavailable or unknown.
+    Dim,
+    /// Idle: off, closed, locked.
+    Off,
+    /// Running: on, playing, detected.
+    On,
+    /// Worth a glance: a window or door open, a lock unlocked.
+    Warn,
+    /// Needs attention: smoke, a leak, tampering.
+    Alert,
+}
+
+#[must_use]
+pub fn tone(entity_id: &str, device_class: Option<&str>, state: &str) -> Tone {
+    if matches!(state, "unavailable" | "unknown") {
+        return Tone::Dim;
+    }
+    let domain = domain_of(entity_id).unwrap_or("");
+    let class = device_class.unwrap_or("");
+    match (domain, state) {
+        ("binary_sensor", "on") => match class {
+            "smoke" | "moisture" | "tamper" | "gas" | "safety" | "problem" => Tone::Alert,
+            "window" | "door" | "opening" | "garage_door" => Tone::Warn,
+            _ => Tone::On,
+        },
+        ("lock", "unlocked" | "open" | "unlocking") => Tone::Warn,
+        ("cover", "open" | "opening" | "closing") => Tone::Warn,
+        (_, s) if is_active(s) => Tone::On,
+        _ => Tone::Off,
+    }
+}
+
+/// The state as a tile shows it: windows read "Open", not "on".
+#[must_use]
+pub fn display_state(entity_id: &str, device_class: Option<&str>, state: &str, unit: Option<&str>) -> String {
+    let domain = domain_of(entity_id).unwrap_or("");
+    let class = device_class.unwrap_or("");
+    let word = match (domain, class, state) {
+        (_, _, "unavailable") => return "Nedostupné".to_string(),
+        (_, _, "unknown") => return "Neznámé".to_string(),
+        ("binary_sensor", "window" | "door" | "opening" | "garage_door", "on") => "Otevřeno",
+        ("binary_sensor", "window" | "door" | "opening" | "garage_door", "off") => "Zavřeno",
+        ("binary_sensor", "motion" | "occupancy" | "presence", "on") => "Pohyb",
+        ("binary_sensor", "motion" | "occupancy" | "presence", "off") => "Klid",
+        ("binary_sensor", "moisture", "on") => "Mokro",
+        ("binary_sensor", "moisture", "off") => "Sucho",
+        ("binary_sensor", "smoke", "on") => "Kouř!",
+        ("binary_sensor", "smoke", "off") => "V pořádku",
+        ("binary_sensor", "tamper", "on") => "Manipulace",
+        ("binary_sensor", "tamper", "off") => "V pořádku",
+        ("binary_sensor", "vibration", "on") => "Vibrace",
+        ("binary_sensor", "vibration", "off") => "Klid",
+        ("lock", _, "locked") => "Zamčeno",
+        ("lock", _, "unlocked") => "Odemčeno",
+        ("cover", _, "open") => "Otevřeno",
+        ("cover", _, "closed") => "Zavřeno",
+        ("cover", _, "opening") => "Otevírá se",
+        ("cover", _, "closing") => "Zavírá se",
+        (_, _, "on") if unit.is_none() => "Zapnuto",
+        (_, _, "off") if unit.is_none() => "Vypnuto",
+        _ => return state_line(state, unit),
+    };
+    word.to_string()
+}
+
+/// The icon for a tile: the entity's own `mdi:` icon when there is one, else a default for its kind.
+#[must_use]
+pub fn default_icon(entity_id: &str, device_class: Option<&str>, state: &str) -> &'static str {
+    let on = is_active(state);
+    let class = device_class.unwrap_or("");
+    match (domain_of(entity_id).unwrap_or(""), class) {
+        ("binary_sensor", "window") => if on { "window-open-variant" } else { "window-closed-variant" },
+        ("binary_sensor", "door" | "opening") => if on { "door-open" } else { "door-closed" },
+        ("binary_sensor", "garage_door") => if on { "garage-open-variant" } else { "garage-variant" },
+        ("binary_sensor", "motion" | "occupancy" | "presence") => if on { "motion-sensor" } else { "motion-sensor-off" },
+        ("binary_sensor", "smoke") => "smoke-detector-variant",
+        ("binary_sensor", "moisture") => "water-alert",
+        ("binary_sensor", "tamper") => "shield-alert",
+        ("binary_sensor", "vibration") => "vibrate",
+        ("binary_sensor", _) => "alert-circle",
+        ("sensor", "temperature") => "thermometer",
+        ("sensor", "humidity") => "water-percent",
+        ("sensor", "carbon_dioxide") => "molecule-co2",
+        ("sensor", "power") => "flash",
+        ("sensor", "battery") => "battery",
+        ("sensor", _) => "thermometer",
+        ("light", _) => if on { "lightbulb" } else { "lightbulb-outline" },
+        ("switch", "outlet") => "power-plug",
+        ("switch" | "input_boolean", _) => if on { "toggle-switch" } else { "toggle-switch-off-outline" },
+        ("lock", _) => if on { "lock-open-variant" } else { "lock" },
+        ("cover", "garage") => if on { "garage-open-variant" } else { "garage-variant" },
+        ("cover", _) => if on { "blinds-open" } else { "blinds" },
+        ("fan", _) => "fan",
+        ("climate", _) => "thermostat",
+        ("script", _) => "script-text-play",
+        ("scene", _) => "movie-open",
+        ("button" | "input_button", _) => "gesture-tap-button",
+        ("automation", _) => "robot",
+        ("media_player", "tv") => "television",
+        ("media_player", _) => "speaker",
+        ("person", _) => "account",
+        _ => "help-circle-outline",
+    }
+}
+
+/// `mdi:lightbulb` gives `lightbulb`; other icon sets (`ios:…`) give nothing.
+#[must_use]
+pub fn mdi_name(icon_attr: &str) -> Option<&str> {
+    icon_attr.strip_prefix("mdi:").filter(|n| !n.is_empty())
+}
+
+/// Grid columns for `count` tiles: bigger tiles while there are few.
+#[must_use]
+pub fn columns(count: usize) -> usize {
+    match count {
+        0..=4 => 2.max(count),
+        5..=8 => 4,
+        9..=15 => 5,
+        _ => 6,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bmc_wasm_sdk::wasm_test;
@@ -146,6 +271,30 @@ mod tests {
     #[wasm_test]
     fn requests() {
         assert_eq!(service_request("light.a"), "{\"entity_id\":\"light.a\"}");
+    }
+
+    #[wasm_test]
+    fn window_and_door_states() {
+        assert_eq!(display_state("binary_sensor.okno", Some("window"), "on", None), "Otevřeno");
+        assert_eq!(display_state("binary_sensor.okno", Some("window"), "off", None), "Zavřeno");
+        assert_eq!(display_state("binary_sensor.x", Some("opening"), "unavailable", None), "Nedostupné");
+        assert_eq!(display_state("lock.dvere", None, "locked", None), "Zamčeno");
+        assert_eq!(display_state("sensor.t", Some("temperature"), "21.5", Some("°C")), "21.5 °C");
+        assert_eq!(display_state("light.a", None, "on", None), "Zapnuto");
+        assert_eq!(tone("binary_sensor.okno", Some("window"), "on"), Tone::Warn);
+        assert_eq!(tone("binary_sensor.okno", Some("window"), "off"), Tone::Off);
+        assert_eq!(tone("binary_sensor.kour", Some("smoke"), "on"), Tone::Alert);
+        assert_eq!(tone("light.a", None, "on"), Tone::On);
+        assert_eq!(tone("light.a", None, "unavailable"), Tone::Dim);
+    }
+
+    #[wasm_test]
+    fn icons_and_grid() {
+        assert_eq!(default_icon("binary_sensor.okno", Some("window"), "on"), "window-open-variant");
+        assert_eq!(default_icon("light.a", None, "off"), "lightbulb-outline");
+        assert_eq!(mdi_name("mdi:lightbulb"), Some("lightbulb"));
+        assert_eq!(mdi_name("ios:pc"), None);
+        assert_eq!((columns(1), columns(8), columns(9), columns(24)), (2, 4, 5, 6));
     }
 
     #[wasm_test]

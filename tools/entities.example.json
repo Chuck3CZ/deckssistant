@@ -1,0 +1,9 @@
+[
+ {"entity_id": "light.living_room", "name": "Living room light", "device_class": ""},
+ {"entity_id": "switch.fan", "name": "Fan", "device_class": ""},
+ {"entity_id": "binary_sensor.bedroom_window", "name": "Bedroom window", "device_class": "window"},
+ {"entity_id": "binary_sensor.front_door", "name": "Front door", "device_class": "door"},
+ {"entity_id": "cover.garage_door", "name": "Garage door", "device_class": "garage"},
+ {"entity_id": "lock.front_door", "name": "Front door lock", "device_class": ""},
+ {"entity_id": "sensor.living_room_temperature", "name": "Living room temperature", "device_class": "temperature"}
+]
