@@ -12,6 +12,15 @@ pub struct Params {
     pub ha_url: String,
     /// The entity ids chosen in the slots, in slot order, empty slots skipped.
     pub entities: Vec<String>,
+    /// Light the strip when a tile's entity changes state.
+    pub led_notify: bool,
+    /// `RRGGBB`.
+    pub led_color: String,
+    /// `solid`, `breathe`, `chase` or `scan`.
+    pub led_effect: String,
+    pub led_seconds: u32,
+    /// Only for things that open or alarm, not every switch.
+    pub led_alerts_only: bool,
 }
 
 impl Params {
@@ -22,6 +31,13 @@ impl Params {
             entities: (1..=SLOTS)
                 .filter_map(|i| <String as ParamRead>::read_optional(snap, &format!("e{i:02}")))
                 .collect(),
+            led_notify: <bool as ParamRead>::read_optional(snap, "led_notify").unwrap_or(false),
+            led_color: <String as ParamRead>::read_optional(snap, "led_color").unwrap_or_else(|| "FF0000".to_string()),
+            led_effect: <String as ParamRead>::read_optional(snap, "led_effect").unwrap_or_else(|| "breathe".to_string()),
+            led_seconds: <i32 as ParamRead>::read_optional(snap, "led_seconds")
+                .and_then(|s| u32::try_from(s).ok())
+                .unwrap_or(5),
+            led_alerts_only: <bool as ParamRead>::read_optional(snap, "led_alerts_only").unwrap_or(false),
         }
     }
 

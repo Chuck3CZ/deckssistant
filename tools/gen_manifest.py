@@ -27,6 +27,23 @@ GROUPS = [("Okna a dveře", lambda d, c: d == "binary_sensor" and c in ("window"
           ("Scény a skripty", lambda d, c: True)]
 
 
+LED_COLORS = [("Red", "FF0000"), ("Orange", "FF8000"), ("Yellow", "FFD000"), ("Green", "00D000"),
+              ("Cyan", "00C8FF"), ("Blue", "0040FF"), ("Purple", "A000FF"), ("White", "FFFFFF")]
+LED_EFFECTS = [("Breathing", "breathe"), ("Solid", "solid"), ("Chase", "chase"), ("Scan", "scan")]
+LED_PARAMS = {
+    "led_notify": {"name": "LED notification on state change", "type": "boolean", "default_value": False,
+                   "description": "Light the Deck's LED strip for a few seconds when a switch, light, window, door, lock or cover changes state. "
+                                  "Temperatures and other numbers never trigger it."},
+    "led_color": {"name": "LED colour", "type": "string", "default_value": "FF0000",
+                  "enum_values": [{"value": v, "label": n} for n, v in LED_COLORS]},
+    "led_effect": {"name": "LED effect", "type": "string", "default_value": "breathe",
+                   "enum_values": [{"value": v, "label": n} for n, v in LED_EFFECTS]},
+    "led_seconds": {"name": "LED duration (seconds)", "type": "integer", "default_value": 5, "min": 1, "max": 60},
+    "led_alerts_only": {"name": "LED only for open and alarm states", "type": "boolean", "default_value": False,
+                        "description": "Skip lights and switches: notify only when a window, door, lock or cover opens, or smoke, a leak or tampering is detected."},
+}
+
+
 def from_ha(url, token):
     req = urllib.request.Request(url.rstrip("/") + "/api/states", headers={"Authorization": "Bearer " + token})
     with urllib.request.urlopen(req, timeout=20) as r:
@@ -72,6 +89,7 @@ def main():
                               "enum_values": options}
         if params[f"e{i:02}"]["description"] is None:
             del params[f"e{i:02}"]["description"]
+    params.update(LED_PARAMS)
     m["params"] = params
     text = json.dumps(m, ensure_ascii=False, separators=(",", ":")) + "\n"
     size = len(text.encode())

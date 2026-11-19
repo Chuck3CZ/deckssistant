@@ -116,6 +116,32 @@ pub fn state_line(state: &str, unit: Option<&str>) -> String {
     }
 }
 
+/// `RRGGBB` (an optional leading `#` is tolerated) as `0xRRGGBB`.
+#[must_use]
+pub fn parse_hex_color(raw: &str) -> Option<u32> {
+    let hex = raw.trim().trim_start_matches('#');
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(hex, 16).ok()
+}
+
+/// Whether a change of state should light the LED. Only things that switch or open and close count:
+/// a temperature that drifts would blink all day. A change to or from "unavailable" is a connection
+/// hiccup, not an event.
+#[must_use]
+pub fn led_trigger(entity_id: &str, device_class: Option<&str>, old: &str, new: &str, alerts_only: bool) -> bool {
+    let unsettled = |s: &str| matches!(s, "unavailable" | "unknown");
+    if old == new || unsettled(old) || unsettled(new) {
+        return false;
+    }
+    let watched = matches!(
+        domain_of(entity_id),
+        Some("binary_sensor" | "light" | "switch" | "input_boolean" | "cover" | "lock" | "fan")
+    );
+    watched && (!alerts_only || matches!(tone(entity_id, device_class, new), Tone::Warn | Tone::Alert))
+}
+
 /// What an on/off entity shows right after a tap, before Home Assistant confirms it.
 #[must_use]
 pub fn toggled_state(state: &str) -> Option<&'static str> {
@@ -296,6 +322,21 @@ mod tests {
         assert_eq!(tone("binary_sensor.kour", Some("smoke"), "on"), Tone::Alert);
         assert_eq!(tone("light.a", None, "on"), Tone::On);
         assert_eq!(tone("light.a", None, "unavailable"), Tone::Dim);
+    }
+
+    #[wasm_test]
+    fn led_triggers_and_colors() {
+        assert!(led_trigger("binary_sensor.okno", Some("window"), "off", "on", false));
+        assert!(led_trigger("light.a", None, "on", "off", false));
+        assert!(!led_trigger("light.a", None, "on", "on", false));
+        assert!(!led_trigger("light.a", None, "unavailable", "on", false));
+        assert!(!led_trigger("sensor.t", Some("temperature"), "21", "22", false));
+        assert!(led_trigger("binary_sensor.okno", Some("window"), "off", "on", true));
+        assert!(!led_trigger("binary_sensor.okno", Some("window"), "on", "off", true));
+        assert_eq!(parse_hex_color("FF8000"), Some(0xFF_80_00));
+        assert_eq!(parse_hex_color("#00c8ff"), Some(0x00_C8_FF));
+        assert_eq!(parse_hex_color("red"), None);
+        assert_eq!(parse_hex_color("FF80"), None);
     }
 
     #[wasm_test]

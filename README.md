@@ -23,6 +23,16 @@ The widget polls the Home Assistant REST API (`GET /api/states/<entity>` per til
 
 Firmware 26.10.1 does not know the `home-assistant` credential type, so this widget uses `generic-token`.
 
+## LED notification
+
+The Deck's LED strip can announce a change. In the widget settings turn on **LED notification on state change** and
+pick the colour, effect and duration (1–60 s). It fires when a light, switch, window/door sensor, lock or cover
+changes state while the widget polls, whether or not this widget is the scene on screen (it uses the LED's global
+tier, which any scene's own LED effect outranks). **LED only for open and alarm states** narrows it to windows, doors,
+locks and covers opening and to smoke, leak and tamper sensors. Temperatures and other numbers never fire it, a change
+to or from "unavailable" is ignored, and neither is the first answer after the widget starts. A tap on the Deck itself
+does fire it, so it also confirms the command.
+
 ## Your own entity list
 
 The Deck's settings UI only knows fixed option lists, so the dropdowns are baked into `manifest.json`. The wasm does

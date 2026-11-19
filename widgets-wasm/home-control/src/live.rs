@@ -29,7 +29,7 @@ use bmc_wasm_sdk::*;
 
 use crate::icons;
 use crate::logic::{
-    Tone, base_url, columns, default_icon, display_state, mdi_name, service_request, tap_for, toggled_state, tone,
+    Tone, base_url, columns, default_icon, display_state, mdi_name, service_request, led_trigger, parse_hex_color, tap_for, toggled_state, tone,
     valid_entity_id,
 };
 use crate::manifest_params::Params;
@@ -119,6 +119,24 @@ fn config() -> (Option<String>, Vec<String>) {
     (base_url(&p.ha_url), ids)
 }
 
+/// Light the strip for a few seconds in the colour chosen in the settings. The global tier shows
+/// whichever scene is on screen; `stop` first so quick changes do not queue up one effect each.
+fn notify_led() {
+    let p = Params::current();
+    if !p.led_notify {
+        return;
+    }
+    let rgb = parse_hex_color(&p.led_color).unwrap_or(0xFF_00_00);
+    let effect = match p.led_effect.as_str() {
+        "solid" => led::LedEffect::Solid,
+        "chase" => led::LedEffect::Chase,
+        "scan" => led::LedEffect::Scan,
+        _ => led::LedEffect::Breathe,
+    };
+    led::stop();
+    led::set_effect_global(effect, Color::from_hex(rgb), 1_500, Some(p.led_seconds.clamp(1, 60) * 1_000));
+}
+
 fn severity(health: Health) -> u8 {
     match health {
         Health::NotConfigured => 3,
@@ -171,15 +189,19 @@ fn poll(delay_ms: u32) {
 
 fn on_state(response: &FetchResponse) {
     let mut next = None;
+    let mut light_led = false;
     STATE.with_borrow_mut(|s| {
         let Some(pos) = s.inflight.iter().position(|(id, _)| *id == response.request_id) else {
             return;
         };
         let (_, index) = s.inflight.remove(pos);
+        let ids_now = config().1;
+        let alerts_only = Params::current().led_alerts_only;
         let result = match response.outcome() {
             Some(FetchOutcome::Http(200..=299)) => {
                 let doc = JsonDoc::parse(response.body());
                 if let (true, Some(tile)) = (doc.is_valid(), s.tiles.get_mut(index)) {
+                    let old = tile.state.take();
                     *tile = Tile {
                         state: doc.str("/state"),
                         name: doc.str("/attributes/friendly_name"),
@@ -187,6 +209,10 @@ fn on_state(response: &FetchResponse) {
                         device_class: doc.str("/attributes/device_class"),
                         icon: doc.str("/attributes/icon"),
                     };
+                    // The first answer for a tile has nothing to compare with, so it never fires.
+                    if let (Some(old), Some(new), Some(id)) = (old.as_deref(), tile.state.as_deref(), ids_now.get(index)) {
+                        light_led = led_trigger(id, tile.device_class.as_deref(), old, new, alerts_only);
+                    }
                     Health::Ok
                 } else {
                     Health::Unreachable
@@ -218,6 +244,9 @@ fn on_state(response: &FetchResponse) {
             next = Some(if s.health == Health::Ok { POLL_MS } else { RETRY_MS });
         }
     });
+    if light_led {
+        notify_led();
+    }
     match next {
         Some(delay) => poll(delay),
         None => request_frame_after(100),
