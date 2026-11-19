@@ -48,6 +48,9 @@ const TEXT_IDLE: Color = Color::from_hex(0xB8_B8_B8);
 const GREEN: Color = Color::from_hex(0x34_C0_6A);
 const AMBER: Color = Color::from_hex(0xF5_A5_24);
 const RED: Color = Color::from_hex(0xFF_4D_4F);
+const PRESSED_BG: Color = Color::from_hex(0x3A_3A_3A);
+/// How long a tile stays lit after the finger lifts, so a quick tap is still seen.
+const FLASH_MS: u32 = 220;
 
 #[derive(Clone, Default)]
 struct Tile {
@@ -73,13 +76,17 @@ struct State {
     inflight: Vec<(FetchRequestId, usize)>,
     /// The next entity to ask about in the cycle under way.
     next: usize,
+    /// The tile under the finger right now.
+    pressed: Option<usize>,
+    /// The tile just tapped and the time left on its highlight.
+    flash: Option<(usize, u32)>,
     /// The worst failure seen in the cycle under way.
     failure: Option<Health>,
 }
 
 thread_local! {
     static STATE: RefCell<State> = const {
-        RefCell::new(State { tiles: Vec::new(), health: Health::Loading, inflight: Vec::new(), next: 0, failure: None })
+        RefCell::new(State { tiles: Vec::new(), health: Health::Loading, inflight: Vec::new(), next: 0, pressed: None, flash: None, failure: None })
     };
 }
 
@@ -272,7 +279,7 @@ fn icon_for(id: &str, t: &Tile) -> Svg {
         .expect("BUG: help-circle-outline is bundled")
 }
 
-fn tile(index: usize, id: &str, t: &Tile, sc: &Scale) -> Node {
+fn tile(index: usize, id: &str, t: &Tile, sc: &Scale, lit: bool) -> Node {
     let key = format!("tile_{index}");
     let raw = t.state.as_deref();
     let tone = raw.map_or(Tone::Dim, |s| tone(id, t.device_class.as_deref(), s));
@@ -285,7 +292,7 @@ fn tile(index: usize, id: &str, t: &Tile, sc: &Scale) -> Node {
     let weight = if matches!(tone, Tone::On | Tone::Warn | Tone::Alert) { FontWeight::BOLD } else { FontWeight::REGULAR };
     let icon = icon_for(id, t);
     row(
-        props!(flex: 1.0, background: GRAY_100, padding: 10.0, gap: 10.0, border_radius: 8.0, cross_align: CrossAlign::Center),
+        props!(flex: 1.0, background: if lit { PRESSED_BG } else { GRAY_100 }, padding: 10.0, gap: 10.0, border_radius: 8.0, cross_align: CrossAlign::Center),
         vec![
             canvas(
                 props!(width: sc.icon, height: sc.icon),
@@ -314,10 +321,13 @@ fn tile(index: usize, id: &str, t: &Tile, sc: &Scale) -> Node {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn render(_delta_ms: u32) {
+pub extern "C" fn render(delta_ms: u32) {
     let size = widget_size();
     let (base, ids) = config();
-    let (tiles, health) = STATE.with_borrow(|s| (s.tiles.clone(), s.health));
+    let (tiles, health, lit) = STATE.with_borrow_mut(|s| {
+        s.flash = s.flash.and_then(|(i, left)| left.checked_sub(delta_ms).filter(|l| *l > 0).map(|l| (i, l)));
+        (s.tiles.clone(), s.health, (s.pressed, s.flash.map(|(i, _)| i)))
+    });
 
     let note = match health {
         _ if base.is_none() => Some("Nastav adresu Home Assistantu (http://IP:8123) v nastavení widgetu"),
@@ -338,7 +348,10 @@ pub extern "C" fn render(_delta_ms: u32) {
     let mut nodes: Vec<Node> = ids
         .iter()
         .enumerate()
-        .map(|(i, id)| tile(i, id, &tiles.get(i).cloned().unwrap_or_default(), &sc))
+        .map(|(i, id)| {
+            let is_lit = lit.0 == Some(i) || lit.1 == Some(i);
+            tile(i, id, &tiles.get(i).cloned().unwrap_or_default(), &sc, is_lit)
+        })
         .collect();
     while nodes.len() % cols != 0 {
         nodes.push(col(props!(flex: 1.0), Vec::<Node>::new()));
@@ -359,6 +372,20 @@ pub extern "C" fn render(_delta_ms: u32) {
         size.height,
         col(props!(background: BLACK, padding: GAP, gap: GAP), children),
     );
+
+    let pressed = (0..ids.len()).find(|i| result.drags.contains_key(format!("tile_{i}").as_str()));
+    let tapped = (0..ids.len()).find(|i| result.clicks.contains_key(format!("tile_{i}").as_str()));
+    let changed = STATE.with_borrow_mut(|s| {
+        let before = (s.pressed, s.flash.map(|(i, _)| i));
+        s.pressed = pressed;
+        if let Some(i) = tapped {
+            s.flash = Some((i, FLASH_MS));
+        }
+        s.flash.is_some() || before != (s.pressed, s.flash.map(|(i, _)| i))
+    });
+    if changed {
+        request_frame_after(50);
+    }
 
     let Some(base) = base else { return };
     for (i, id) in ids.iter().enumerate() {
