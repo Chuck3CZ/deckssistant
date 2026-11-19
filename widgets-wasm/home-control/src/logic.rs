@@ -142,6 +142,30 @@ pub fn led_trigger(entity_id: &str, device_class: Option<&str>, old: &str, new: 
     watched && (!alerts_only || matches!(tone(entity_id, device_class, new), Tone::Warn | Tone::Alert))
 }
 
+/// The colour family an active tile of this kind is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Accent {
+    Yellow,
+    Blue,
+    Purple,
+}
+
+/// Lights are yellow, motion and windows and doors blue, garage doors and covers purple.
+/// Everything else keeps the generic on/open colours.
+#[must_use]
+pub fn accent(entity_id: &str, device_class: Option<&str>) -> Option<Accent> {
+    let class = device_class.unwrap_or("");
+    if entity_id.contains("garaz") || entity_id.contains("garage") {
+        return Some(Accent::Purple);
+    }
+    match (domain_of(entity_id)?, class) {
+        ("light", _) => Some(Accent::Yellow),
+        ("cover", _) | ("binary_sensor", "garage_door") => Some(Accent::Purple),
+        ("binary_sensor", "motion" | "occupancy" | "presence" | "window" | "door" | "opening") => Some(Accent::Blue),
+        _ => None,
+    }
+}
+
 /// What an on/off entity shows right after a tap, before Home Assistant confirms it.
 #[must_use]
 pub fn toggled_state(state: &str) -> Option<&'static str> {
@@ -322,6 +346,19 @@ mod tests {
         assert_eq!(tone("binary_sensor.kour", Some("smoke"), "on"), Tone::Alert);
         assert_eq!(tone("light.a", None, "on"), Tone::On);
         assert_eq!(tone("light.a", None, "unavailable"), Tone::Dim);
+    }
+
+    #[wasm_test]
+    fn accents_by_kind() {
+        assert_eq!(accent("light.a", None), Some(Accent::Yellow));
+        assert_eq!(accent("binary_sensor.m", Some("motion")), Some(Accent::Blue));
+        assert_eq!(accent("binary_sensor.o", Some("window")), Some(Accent::Blue));
+        assert_eq!(accent("binary_sensor.d", Some("opening")), Some(Accent::Blue));
+        assert_eq!(accent("cover.r", Some("blind")), Some(Accent::Purple));
+        assert_eq!(accent("binary_sensor.garaz_vrata_cidlo_vrat", Some("garage_door")), Some(Accent::Purple));
+        assert_eq!(accent("switch.venku_garaz_vrata_vrata", None), Some(Accent::Purple));
+        assert_eq!(accent("switch.fan", None), None);
+        assert_eq!(accent("binary_sensor.kour", Some("smoke")), None);
     }
 
     #[wasm_test]

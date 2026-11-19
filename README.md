@@ -2,8 +2,8 @@
 
 Home Assistant widget for the [Braiins Deck](https://braiinsforge.com/hardware/braiins-deck) (firmware 26.10.1+).
 Shows up to 24 tiles with the entity's Home Assistant icon (Material Design Icons) and a readable state: windows and
-doors say "Otevřeno" / "Zavřeno", locks "Zamčeno" / "Odemčeno", sensors show value and unit. Colours mark what is on,
-open (amber) or alarming (red: smoke, leak, tamper). A tap toggles lights, switches, fans, covers and automations, runs
+doors say "Otevřeno" / "Zavřeno", locks "Zamčeno" / "Odemčeno", sensors show value and unit. Active tiles are coloured by kind: lights yellow, motion sensors and windows/doors blue, garage doors and covers
+purple; other things that are on show green, an unlocked lock amber, and smoke, leak and tamper alarms red. A tap toggles lights, switches, fans, covers and automations, runs
 scenes and scripts, and presses buttons; sensors, windows and doors are read-only.
 
 Built on the SDK and Home Assistant client from [BraiinsForge/bmc-main](https://github.com/BraiinsForge/bmc-main).
@@ -31,7 +31,8 @@ changes state while the widget polls, whether or not this widget is the scene on
 tier, which any scene's own LED effect outranks). **LED only for open and alarm states** narrows it to windows, doors,
 locks and covers opening and to smoke, leak and tamper sensors. Temperatures and other numbers never fire it, a change
 to or from "unavailable" is ignored, and neither is the first answer after the widget starts. A tap on the Deck itself
-does fire it, so it also confirms the command.
+fires it once Home Assistant confirms the new state. Changing any LED setting lights the strip once as a preview;
+watch `/var/log/bmc/*.log` for `home-control: LED …` lines if nothing lights.
 
 ## Your own entity list
 

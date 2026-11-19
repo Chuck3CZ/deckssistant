@@ -29,7 +29,7 @@ use bmc_wasm_sdk::*;
 
 use crate::icons;
 use crate::logic::{
-    Tone, base_url, columns, default_icon, display_state, mdi_name, service_request, led_trigger, parse_hex_color, tap_for, toggled_state, tone,
+    Accent, Tone, accent, base_url, columns, default_icon, display_state, mdi_name, service_request, led_trigger, parse_hex_color, tap_for, toggled_state, tone,
     valid_entity_id,
 };
 use crate::manifest_params::Params;
@@ -48,6 +48,9 @@ const TEXT_IDLE: Color = Color::from_hex(0xB8_B8_B8);
 const GREEN: Color = Color::from_hex(0x34_C0_6A);
 const AMBER: Color = Color::from_hex(0xF5_A5_24);
 const RED: Color = Color::from_hex(0xFF_4D_4F);
+const YELLOW: Color = Color::from_hex(0xFF_C8_3D);
+const BLUE: Color = Color::from_hex(0x3D_9B_FF);
+const PURPLE: Color = Color::from_hex(0xB3_6B_FF);
 const PRESSED_BG: Color = Color::from_hex(0x3A_3A_3A);
 /// How long a tile stays lit after the finger lifts, so a quick tap is still seen.
 const FLASH_MS: u32 = 220;
@@ -133,6 +136,7 @@ fn notify_led() {
         "scan" => led::LedEffect::Scan,
         _ => led::LedEffect::Breathe,
     };
+    log_info!("home-control: LED {} #{} for {} s", p.led_effect, p.led_color, p.led_seconds);
     led::stop();
     led::set_effect_global(effect, Color::from_hex(rgb), 1_500, Some(p.led_seconds.clamp(1, 60) * 1_000));
 }
@@ -311,6 +315,7 @@ fn on_service_done(response: &FetchResponse) {
 
 fn on_confirm(response: &FetchResponse) {
     let mut resume = false;
+    let mut light_led = false;
     STATE.with_borrow_mut(|s| {
         let Some(p) = s.pending.as_mut() else { return };
         if p.confirm != Some(response.request_id) {
@@ -327,6 +332,7 @@ fn on_confirm(response: &FetchResponse) {
             _ => false,
         };
         let done = matched || p.attempts >= CONFIRM_MAX;
+        let alerts_only = Params::current().led_alerts_only;
         let index = p.index;
         if let (true, Some(tile)) = (answered, s.tiles.get_mut(index)) {
             tile.name = doc.str("/attributes/friendly_name");
@@ -334,6 +340,9 @@ fn on_confirm(response: &FetchResponse) {
             tile.device_class = doc.str("/attributes/device_class");
             tile.icon = doc.str("/attributes/icon");
             if done {
+                if let (true, Some(before), Some(new)) = (matched, p.before.as_deref(), state.as_deref()) {
+                    light_led = led_trigger(&p.entity, tile.device_class.as_deref(), before, new, alerts_only);
+                }
                 tile.state = state;
             }
         }
@@ -342,6 +351,9 @@ fn on_confirm(response: &FetchResponse) {
             resume = true;
         }
     });
+    if light_led {
+        notify_led();
+    }
     if resume {
         poll(200);
     }
@@ -359,6 +371,18 @@ pub extern "C" fn on_params_update() {
         s.tiles.clear();
         s.pending = None;
     });
+    // Changing a LED setting lights the strip once, so the choice can be seen at once.
+    let now = Params::current();
+    if now.led_notify
+        && Params::previous().is_some_and(|b| {
+            !b.led_notify
+                || b.led_color != now.led_color
+                || b.led_effect != now.led_effect
+                || b.led_seconds != now.led_seconds
+        })
+    {
+        notify_led();
+    }
     poll(0);
 }
 
@@ -427,7 +451,12 @@ fn tile(index: usize, id: &str, t: &Tile, sc: &Scale, lit: bool) -> Node {
     let key = format!("tile_{index}");
     let raw = t.state.as_deref();
     let tone = raw.map_or(Tone::Dim, |s| tone(id, t.device_class.as_deref(), s));
-    let color = tone_color(tone);
+    let color = match (tone, accent(id, t.device_class.as_deref())) {
+        (Tone::On | Tone::Warn, Some(Accent::Yellow)) => YELLOW,
+        (Tone::On | Tone::Warn, Some(Accent::Blue)) => BLUE,
+        (Tone::On | Tone::Warn, Some(Accent::Purple)) => PURPLE,
+        _ => tone_color(tone),
+    };
     let name = t.name.clone().unwrap_or_else(|| id.to_string());
     let line = raw.map_or_else(
         || "…".to_string(),

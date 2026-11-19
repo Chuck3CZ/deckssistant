@@ -41,6 +41,13 @@ impl Params {
         }
     }
 
+    /// The snapshot delivered before the current one; `None` until a second one arrives.
+    #[must_use]
+    pub fn previous() -> Option<Self> {
+        let prev = snapshot::previous();
+        if prev.is_empty() { None } else { Some(Self::from_snapshot(&prev)) }
+    }
+
     /// Latest snapshot, parsed again only when the host delivers a new one.
     #[must_use]
     pub fn current() -> Self {
