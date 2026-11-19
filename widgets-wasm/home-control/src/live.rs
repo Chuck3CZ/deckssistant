@@ -51,6 +51,11 @@ const RED: Color = Color::from_hex(0xFF_4D_4F);
 const PRESSED_BG: Color = Color::from_hex(0x3A_3A_3A);
 /// How long a tile stays lit after the finger lifts, so a quick tap is still seen.
 const FLASH_MS: u32 = 220;
+/// After a tap, ask Home Assistant about that entity alone: first soon, then every half second.
+const CONFIRM_FIRST_MS: u32 = 350;
+const CONFIRM_NEXT_MS: u32 = 500;
+/// Give up waiting for the state to change after this many answers and show what Home Assistant says.
+const CONFIRM_MAX: u32 = 6;
 
 #[derive(Clone, Default)]
 struct Tile {
@@ -59,6 +64,18 @@ struct Tile {
     unit: Option<String>,
     device_class: Option<String>,
     icon: Option<String>,
+}
+
+/// A tap whose result is still being confirmed. While it lasts the tapped tile keeps its optimistic
+/// state, so an answer from before Home Assistant caught up cannot flip it back.
+struct Pending {
+    index: usize,
+    entity: String,
+    expect: Option<&'static str>,
+    before: Option<String>,
+    attempts: u32,
+    post_tries: u32,
+    confirm: Option<FetchRequestId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,6 +95,7 @@ struct State {
     next: usize,
     /// The tile under the finger right now.
     pressed: Option<usize>,
+    pending: Option<Pending>,
     /// The tile just tapped and the time left on its highlight.
     flash: Option<(usize, u32)>,
     /// The worst failure seen in the cycle under way.
@@ -86,7 +104,7 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<State> = const {
-        RefCell::new(State { tiles: Vec::new(), health: Health::Loading, inflight: Vec::new(), next: 0, pressed: None, flash: None, failure: None })
+        RefCell::new(State { tiles: Vec::new(), health: Health::Loading, inflight: Vec::new(), next: 0, pressed: None, pending: None, flash: None, failure: None })
     };
 }
 
@@ -122,6 +140,9 @@ fn send_state_get(s: &mut State, base: &str, ids: &[String], i: usize, delay_ms:
 /// Cancel whatever is queued and ask Home Assistant about every entity, after `delay_ms`.
 /// Only `WINDOW` requests are out at a time; each answer releases the next one.
 fn poll(delay_ms: u32) {
+    if STATE.with_borrow(|s| s.pending.is_some()) {
+        return;
+    }
     let (base, ids) = config();
     STATE.with_borrow_mut(|s| {
         for (id, _) in s.inflight.drain(..) {
@@ -203,8 +224,99 @@ fn on_state(response: &FetchResponse) {
     }
 }
 
-fn on_service_done(_response: &FetchResponse) {
-    poll(300);
+fn send_service(base: &str, entity: &str) -> bool {
+    let Some(tap) = tap_for(entity) else { return false };
+    let url = format!("{base}/api/services/{}/{}", tap.domain, tap.service);
+    let body = service_request(entity);
+    FetchRequest::post(&url).headers(AUTH).body(body.as_bytes()).send(on_service_done).is_some()
+}
+
+/// Ask for the tapped entity alone after `delay_ms`; false when the request could not be queued.
+fn schedule_confirm(s: &mut State, delay_ms: u32) -> bool {
+    let (Some(base), Some(p)) = (config().0, s.pending.as_mut()) else { return false };
+    if let Some(old) = p.confirm.take() {
+        let _ = cancel(old);
+    }
+    let url = format!("{base}/api/states/{}", p.entity);
+    p.confirm = FetchRequest::get(&url).headers(AUTH).send_after(delay_ms, on_confirm);
+    p.confirm.is_some()
+}
+
+/// The call failed for good: put the tile back as it was.
+fn revert_pending(s: &mut State) {
+    let Some(p) = s.pending.take() else { return };
+    log_error!("home-control: the call for {} failed", p.entity);
+    if let Some(tile) = s.tiles.get_mut(p.index) {
+        tile.state = p.before;
+    }
+}
+
+fn on_service_done(response: &FetchResponse) {
+    let ok = matches!(response.outcome(), Some(FetchOutcome::Http(200..=299)));
+    let transport_failure = !matches!(response.outcome(), Some(FetchOutcome::Http(_)));
+    let mut resume = false;
+    STATE.with_borrow_mut(|s| {
+        let Some(p) = s.pending.as_mut() else { return };
+        if ok {
+            resume = !schedule_confirm(s, CONFIRM_FIRST_MS);
+        } else if transport_failure && p.post_tries == 0 {
+            p.post_tries = 1;
+            let entity = p.entity.clone();
+            if !config().0.is_some_and(|base| send_service(&base, &entity)) {
+                revert_pending(s);
+                resume = true;
+            }
+        } else {
+            revert_pending(s);
+            resume = true;
+        }
+        if resume {
+            s.pending = None;
+        }
+    });
+    if resume {
+        poll(300);
+    }
+    request_frame();
+}
+
+fn on_confirm(response: &FetchResponse) {
+    let mut resume = false;
+    STATE.with_borrow_mut(|s| {
+        let Some(p) = s.pending.as_mut() else { return };
+        if p.confirm != Some(response.request_id) {
+            return;
+        }
+        p.confirm = None;
+        p.attempts += 1;
+        let doc = JsonDoc::parse(response.body());
+        let answered = matches!(response.outcome(), Some(FetchOutcome::Http(200..=299))) && doc.is_valid();
+        let state = if answered { doc.str("/state") } else { None };
+        let matched = match (p.expect, state.as_deref()) {
+            (Some(want), Some(got)) => want == got,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        let done = matched || p.attempts >= CONFIRM_MAX;
+        let index = p.index;
+        if let (true, Some(tile)) = (answered, s.tiles.get_mut(index)) {
+            tile.name = doc.str("/attributes/friendly_name");
+            tile.unit = doc.str("/attributes/unit_of_measurement");
+            tile.device_class = doc.str("/attributes/device_class");
+            tile.icon = doc.str("/attributes/icon");
+            if done {
+                tile.state = state;
+            }
+        }
+        if done || !schedule_confirm(s, CONFIRM_NEXT_MS) {
+            s.pending = None;
+            resume = true;
+        }
+    });
+    if resume {
+        poll(200);
+    }
+    request_frame();
 }
 
 #[unsafe(no_mangle)]
@@ -214,7 +326,10 @@ pub extern "C" fn init() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn on_params_update() {
-    STATE.with_borrow_mut(|s| s.tiles.clear());
+    STATE.with_borrow_mut(|s| {
+        s.tiles.clear();
+        s.pending = None;
+    });
     poll(0);
 }
 
@@ -375,6 +490,7 @@ pub extern "C" fn render(delta_ms: u32) {
 
     let pressed = (0..ids.len()).find(|i| result.drags.contains_key(format!("tile_{i}").as_str()));
     let tapped = (0..ids.len()).find(|i| result.clicks.contains_key(format!("tile_{i}").as_str()));
+    let pressed_before = STATE.with_borrow(|s| s.pressed);
     let changed = STATE.with_borrow_mut(|s| {
         let before = (s.pressed, s.flash.map(|(i, _)| i));
         s.pressed = pressed;
@@ -383,8 +499,10 @@ pub extern "C" fn render(delta_ms: u32) {
         }
         s.flash.is_some() || before != (s.pressed, s.flash.map(|(i, _)| i))
     });
-    if changed {
-        request_frame_after(50);
+    if STATE.with_borrow(|s| s.pressed) != pressed_before {
+        request_frame();
+    } else if changed {
+        request_frame_after(40);
     }
 
     let Some(base) = base else { return };
@@ -392,25 +510,32 @@ pub extern "C" fn render(delta_ms: u32) {
         if !result.clicks.contains_key(format!("tile_{i}").as_str()) {
             continue;
         }
-        let Some(tap) = tap_for(id) else { continue };
-        let url = format!("{base}/api/services/{}/{}", tap.domain, tap.service);
-        let body = service_request(id);
-        let sent = FetchRequest::post(&url)
-            .headers(AUTH)
-            .body(body.as_bytes())
-            .send(on_service_done);
-        if sent.is_none() {
-            log_error!("home-control: service call not queued");
+        if tap_for(id).is_none() {
             continue;
         }
-        // Show the new state at once; the poll that follows the call confirms or corrects it.
-        STATE.with_borrow_mut(|s| {
-            if let Some(t) = s.tiles.get_mut(i)
-                && let Some(flipped) = t.state.as_deref().and_then(toggled_state)
-            {
-                t.state = Some(flipped.to_string());
+        // Drop the running refresh so the call goes out first, then watch only this entity.
+        let sent = STATE.with_borrow_mut(|s| {
+            for (req, _) in s.inflight.drain(..) {
+                let _ = cancel(req);
             }
+            if let Some(old) = s.pending.take().and_then(|p| p.confirm) {
+                let _ = cancel(old);
+            }
+            let before = s.tiles.get(i).and_then(|t| t.state.clone());
+            let expect = before.as_deref().and_then(toggled_state);
+            s.pending = Some(Pending { index: i, entity: id.clone(), expect, before, attempts: 0, post_tries: 0, confirm: None });
+            if let (Some(want), Some(tile)) = (expect, s.tiles.get_mut(i)) {
+                tile.state = Some(want.to_string());
+            }
+            let sent = send_service(&base, id);
+            if !sent {
+                revert_pending(s);
+            }
+            sent
         });
+        if !sent {
+            poll(300);
+        }
         request_frame();
     }
 }
