@@ -50,10 +50,13 @@ The widget lives in the `bmc-main` workspace. Clone `bmc-main`, copy `widgets-wa
 ```sh
 cd widgets-wasm
 cargo build -p home-control --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/home_control.wasm <this repo>/prebuilt/home-control.wasm
+# the firmware rejects a wasm that still carries its embedded icons, so strip them out into asset files:
+cargo run -p bmc-wasm-assets -- extract --input target/wasm32-unknown-unknown/release/home_control.wasm \
+  --wasm-output <this repo>/prebuilt/home-control.wasm --asset-root <this repo>/prebuilt/assets \
+  --artifact-root target/wasm32-unknown-unknown/release/deps
 ```
 
-`prebuilt/home-control.wasm` is what `tools/make_nar.py` packs. `tools/nar.py` is a small Nix-archive reader/writer
+`prebuilt/home-control.wasm` and `prebuilt/assets/` are what `tools/make_nar.py` packs. `tools/nar.py` is a small Nix-archive reader/writer
 (`ls`, `unpack`, `pack`) for when Nix is not installed.
 
 ## Icons
