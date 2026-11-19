@@ -1,0 +1,15 @@
+[package]
+name = "home-control"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+bmc-wasm-sdk = { path = "../../bmc-wasm-runtime/sdk" }
+home-assistant = { path = "../lib/home-assistant" }
+
+[lints]
+workspace = true

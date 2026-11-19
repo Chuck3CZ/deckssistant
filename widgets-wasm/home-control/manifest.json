@@ -1,0 +1,50 @@
+{
+  "$schema": "../../bmc-widget-manifest/manifest.schema.json",
+  "uid": "b4f1fb26-1149-4915-9908-cf560e8e0ddc",
+  "version": "0.1.0",
+  "name": "Home Control",
+  "description": "Show and toggle Home Assistant entities with a tap",
+  "binary": "bin/home-control",
+  "supported_viewports": [
+    {
+      "type": "rectangular",
+      "min_width": 317,
+      "max_width": 1280,
+      "min_height": 238,
+      "max_height": 480
+    }
+  ],
+  "credentials": {
+    "ha": {
+      "type": "home-assistant",
+      "label": "Home Assistant",
+      "description": "Instance address and long-lived access token",
+      "required": true
+    }
+  },
+  "params": {
+    "entities": {
+      "name": "Entities",
+      "description": "Tiles in display order. Tap toggles lights, switches, fans and similar; runs scenes, scripts and buttons.",
+      "type": "array",
+      "max_items": 8,
+      "unique_items": ["entity_id"],
+      "items": {
+        "type": "object",
+        "fields": {
+          "entity_id": {
+            "name": "Entity ID",
+            "type": "string",
+            "min_length": 3,
+            "placeholder": "e.g. light.living_room"
+          },
+          "label": {
+            "name": "Label",
+            "type": "string",
+            "optional": true
+          }
+        }
+      }
+    }
+  }
+}
