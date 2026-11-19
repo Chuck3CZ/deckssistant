@@ -93,17 +93,6 @@ fn json_escape(raw: &str) -> String {
     out
 }
 
-/// The body of `POST /api/template`: a template that renders one JSON array with the
-/// state, name and unit of every entity, in order.
-#[must_use]
-pub fn template_request(ids: &[String]) -> String {
-    let list = ids.iter().map(|id| format!("'{id}'")).collect::<Vec<_>>().join(",");
-    let template = format!(
-        "[{{% for i in [{list}] %}}{{\"s\":{{{{ states(i)|tojson }}}},\"n\":{{{{ state_attr(i,'friendly_name')|tojson }}}},\"u\":{{{{ state_attr(i,'unit_of_measurement')|tojson }}}}}}{{{{ ',' if not loop.last }}}}{{% endfor %}}]"
-    );
-    format!("{{\"template\":\"{}\"}}", json_escape(&template))
-}
-
 /// The body of a service call for one entity.
 #[must_use]
 pub fn service_request(entity_id: &str) -> String {
@@ -157,9 +146,6 @@ mod tests {
     #[wasm_test]
     fn requests() {
         assert_eq!(service_request("light.a"), "{\"entity_id\":\"light.a\"}");
-        let body = template_request(&["light.a".to_string(), "sensor.b".to_string()]);
-        assert!(body.starts_with("{\"template\":\""));
-        assert!(body.contains("'light.a','sensor.b'"));
     }
 
     #[wasm_test]

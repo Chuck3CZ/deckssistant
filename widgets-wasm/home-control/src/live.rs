@@ -19,20 +19,22 @@
 // the grant above.
 
 //! The entry points the host calls. The widget polls Home Assistant's REST API
-//! with one `/api/template` request for all tiles, and a tap posts a service call.
+//! with one `GET /api/states/<entity>` per tile, and a tap posts a service call.
+//! No Jinja template is sent: the host reads every `{{ … }}` in a request as a credential reference.
 
 use std::cell::RefCell;
 
 use bmc_wasm_sdk::*;
 
 use crate::logic::{
-    base_url, is_active, service_request, state_line, tap_for, template_request, valid_entity_id,
+    base_url, is_active, service_request, state_line, tap_for, valid_entity_id,
 };
 use crate::manifest_params::Params;
 
 const POLL_MS: u32 = 5_000;
 const RETRY_MS: u32 = 15_000;
 const COLUMNS: usize = 4;
+const STAGGER_MS: u32 = 80;
 const GAP: f32 = 8.0;
 const NAME_SIZE: u32 = 16;
 const STATE_SIZE: u32 = 22;
@@ -58,12 +60,14 @@ enum Health {
 struct State {
     tiles: Vec<Tile>,
     health: Health,
-    pending: Option<FetchRequestId>,
+    inflight: Vec<(FetchRequestId, usize)>,
+    /// The worst failure seen in the cycle under way.
+    failure: Option<Health>,
 }
 
 thread_local! {
     static STATE: RefCell<State> = const {
-        RefCell::new(State { tiles: Vec::new(), health: Health::Loading, pending: None })
+        RefCell::new(State { tiles: Vec::new(), health: Health::Loading, inflight: Vec::new(), failure: None })
     };
 }
 
@@ -78,57 +82,87 @@ fn config() -> (Option<String>, Vec<String>) {
     (base_url(&params.ha_url), ids)
 }
 
-/// Cancel whatever is queued and ask Home Assistant now, or after `delay_ms`.
+fn severity(health: Health) -> u8 {
+    match health {
+        Health::NotConfigured => 3,
+        Health::BadToken => 2,
+        Health::Unreachable => 1,
+        _ => 0,
+    }
+}
+
+/// Cancel whatever is queued and ask Home Assistant for every entity, after \`delay_ms\`.
 fn poll(delay_ms: u32) {
     let (base, ids) = config();
     STATE.with_borrow_mut(|s| {
-        if let Some(id) = s.pending.take() {
+        for (id, _) in s.inflight.drain(..) {
             let _ = cancel(id);
         }
+        s.failure = None;
+        s.tiles.resize(ids.len(), Tile::default());
         let Some(base) = base.filter(|_| !ids.is_empty()) else {
             s.health = Health::NotConfigured;
             s.tiles.clear();
             return;
         };
-        let url = format!("{base}/api/template");
-        let body = template_request(&ids);
-        s.pending = FetchRequest::post(&url)
-            .headers(AUTH)
-            .body(body.as_bytes())
-            .send_after(delay_ms, on_states);
+        for (i, entity) in ids.iter().enumerate() {
+            let url = format!("{base}/api/states/{entity}");
+            let delay = delay_ms.saturating_add(STAGGER_MS * u32::try_from(i).unwrap_or(0));
+            if let Some(id) = FetchRequest::get(&url).headers(AUTH).send_after(delay, on_state) {
+                s.inflight.push((id, i));
+            }
+        }
+        if s.inflight.is_empty() {
+            s.health = Health::Unreachable;
+        }
     });
     request_frame();
 }
 
-fn on_states(response: &FetchResponse) {
-    let (_, ids) = config();
-    let mut next = RETRY_MS;
+fn on_state(response: &FetchResponse) {
+    let mut next = None;
     STATE.with_borrow_mut(|s| {
-        s.pending = None;
-        match response.outcome() {
+        let Some(pos) = s.inflight.iter().position(|(id, _)| *id == response.request_id) else {
+            return;
+        };
+        let (_, index) = s.inflight.remove(pos);
+        let outcome = response.outcome();
+        let result = match outcome {
             Some(FetchOutcome::Http(200..=299)) => {
                 let doc = JsonDoc::parse(response.body());
-                let count = doc.len("").unwrap_or(0);
-                if doc.is_valid() && count == ids.len() {
-                    s.tiles = (0..count)
-                        .map(|i| Tile {
-                            state: doc.str(&format!("/{i}/s")),
-                            name: doc.str(&format!("/{i}/n")),
-                            unit: doc.str(&format!("/{i}/u")),
-                        })
-                        .collect();
-                    s.health = Health::Ok;
-                    next = POLL_MS;
+                if let (true, Some(tile)) = (doc.is_valid(), s.tiles.get_mut(index)) {
+                    *tile = Tile {
+                        state: doc.str("/state"),
+                        name: doc.str("/attributes/friendly_name"),
+                        unit: doc.str("/attributes/unit_of_measurement"),
+                    };
+                    Health::Ok
                 } else {
-                    s.health = Health::Unreachable;
+                    Health::Unreachable
                 }
             }
-            Some(FetchOutcome::Http(401 | 403)) => s.health = Health::BadToken,
-            Some(FetchOutcome::Refused) => s.health = Health::NotConfigured,
-            _ => s.health = Health::Unreachable,
+            Some(FetchOutcome::Http(404)) => {
+                if let Some(tile) = s.tiles.get_mut(index) {
+                    *tile = Tile { state: Some("Not found".to_string()), name: None, unit: None };
+                }
+                Health::Ok
+            }
+            Some(FetchOutcome::Http(401 | 403)) => Health::BadToken,
+            Some(FetchOutcome::Refused) => Health::NotConfigured,
+            _ => Health::Unreachable,
+        };
+        if severity(result) > s.failure.map_or(0, severity) {
+            s.failure = Some(result);
+        }
+        if s.inflight.is_empty() {
+            s.health = s.failure.take().unwrap_or(Health::Ok);
+            next = Some(if s.health == Health::Ok { POLL_MS } else { RETRY_MS });
         }
     });
-    poll(next);
+    match next {
+        Some(delay) => poll(delay),
+        None => request_frame_after(100),
+    }
 }
 
 fn on_service_done(_response: &FetchResponse) {
@@ -153,6 +187,10 @@ pub extern "C" fn on_credentials_update() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn on_touch() {
+    // A touch also retries a cycle that could not even be queued.
+    if STATE.with_borrow(|s| s.inflight.is_empty() && s.health == Health::Unreachable) {
+        poll(0);
+    }
     request_frame();
 }
 

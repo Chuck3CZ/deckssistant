@@ -1,7 +1,7 @@
 {
   "$schema": "../../bmc-widget-manifest/manifest.schema.json",
   "uid": "b4f1fb26-1149-4915-9908-cf560e8e0ddc",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "name": "Home Control",
   "description": "Show and toggle Home Assistant entities with a tap (REST API)",
   "binary": "bin/home-control",

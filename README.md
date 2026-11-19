@@ -16,7 +16,7 @@ Licensed GPL-3.0-or-later, like that repository.
 4. In the widget settings, set **Home Assistant address** (e.g. `http://192.168.1.10:8123`) and add the entities
    (e.g. `light.living_room`).
 
-The widget polls the Home Assistant REST API (one `/api/template` request every 5 s) and taps call
+The widget polls the Home Assistant REST API (`GET /api/states/<entity>` per tile every 5 s) and taps call
 `/api/services/<domain>/<service>`. Use an IP address or a name the Deck can resolve. `https://` is not supported.
 
 Firmware 26.10.1 does not know the `home-assistant` credential type, so this widget uses `generic-token`.
